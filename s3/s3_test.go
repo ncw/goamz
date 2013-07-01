@@ -117,6 +117,26 @@ func (s *S) TestURL(c *C) {
 	c.Assert(req.URL.Path, Equals, "/bucket/name")
 }
 
+func (s *S) TestGetReaderHeaders(c *C) {
+	testServer.Response(200, nil, "content")
+
+	b := s.s3.Bucket("bucket")
+	rc, h, err := b.GetReaderHeaders("name", s3.Headers{"test": "potato"})
+	c.Assert(err, IsNil)
+	data, err := ioutil.ReadAll(rc)
+	rc.Close()
+	c.Assert(err, IsNil)
+	c.Assert(string(data), Equals, "content")
+	c.Assert(h["Content-Type"], Equals, "text/plain; charset=utf-8")
+	c.Assert(h["Date"], Not(Equals), "")
+
+	req := testServer.WaitRequest()
+	c.Assert(req.Method, Equals, "GET")
+	c.Assert(req.URL.Path, Equals, "/bucket/name")
+	c.Assert(req.Header["Date"], Not(Equals), "")
+	c.Assert(req.Header["Test"], DeepEquals, []string{"potato"})
+}
+
 func (s *S) TestGetReader(c *C) {
 	testServer.Response(200, nil, "content")
 
@@ -176,6 +196,27 @@ func (s *S) TestPutObject(c *C) {
 	c.Assert(req.Header["Content-Length"], DeepEquals, []string{"7"})
 	//c.Assert(req.Header["Content-MD5"], DeepEquals, "...")
 	c.Assert(req.Header["X-Amz-Acl"], DeepEquals, []string{"private"})
+}
+
+func (s *S) TestPutReaderHeaders(c *C) {
+	testServer.Response(200, nil, "")
+
+	b := s.s3.Bucket("bucket")
+	buf := bytes.NewBufferString("content")
+	h, err := b.PutReaderHeaders("name", buf, int64(buf.Len()), "content-type", s3.Private, s3.Headers{"test": "potato"})
+	c.Assert(err, IsNil)
+	c.Assert(h["Content-Type"], Equals, "text/plain; charset=utf-8")
+	c.Assert(h["Date"], Not(Equals), "")
+
+	req := testServer.WaitRequest()
+	c.Assert(req.Method, Equals, "PUT")
+	c.Assert(req.URL.Path, Equals, "/bucket/name")
+	c.Assert(req.Header["Date"], Not(DeepEquals), []string{""})
+	c.Assert(req.Header["Content-Type"], DeepEquals, []string{"content-type"})
+	c.Assert(req.Header["Content-Length"], DeepEquals, []string{"7"})
+	//c.Assert(req.Header["Content-MD5"], Equals, "...")
+	c.Assert(req.Header["X-Amz-Acl"], DeepEquals, []string{"private"})
+	c.Assert(req.Header["Test"], DeepEquals, []string{"potato"})
 }
 
 func (s *S) TestPutReader(c *C) {

@@ -134,6 +134,32 @@ const (
 	BucketOwnerFull   = ACL("bucket-owner-full-control")
 )
 
+// Headers stores HTTP headers (can only have one of each header which
+// simplifies the use).
+type Headers map[string]string
+
+// readHeaders returns a Headers object from an http.Response.
+func readHeaders(resp *http.Response) Headers {
+	headers := Headers{}
+	for key, values := range resp.Header {
+		headers[key] = values[0]
+	}
+	return headers
+}
+
+// writeHeaders adds headers (if any) to the *http.Header passed in
+func (h Headers) writeHeaders(out *http.Header) {
+	if h == nil {
+		return
+	}
+	if *out == nil {
+		*out = make(http.Header)
+	}
+	for key, value := range h {
+		out.Add(key, value)
+	}
+}
+
 // PutBucket creates a new bucket.
 //
 // See http://goo.gl/ndjnR for details.
@@ -183,17 +209,19 @@ func (b *Bucket) Get(path string) (data []byte, err error) {
 	return data, err
 }
 
-// GetReader retrieves an object from an S3 bucket.
-// It is the caller's responsibility to call Close on rc when
-// finished reading.
-func (b *Bucket) GetReader(path string) (rc io.ReadCloser, err error) {
+// GetReaderHeaders retrieves an object from an S3 bucket.  It is the
+// caller's responsibility to call Close on the io.ReadCloser when
+// finished reading.  Headers are added to the request and returned
+// from the request.
+func (b *Bucket) GetReaderHeaders(path string, headers Headers) (io.ReadCloser, Headers, error) {
 	req := &request{
 		bucket: b.Name,
 		path:   path,
 	}
-	err = b.S3.prepare(req)
+	headers.writeHeaders(&req.headers)
+	err := b.S3.prepare(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for attempt := attempts.Start(); attempt.Next(); {
 		hresp, err := b.S3.run(req)
@@ -201,11 +229,19 @@ func (b *Bucket) GetReader(path string) (rc io.ReadCloser, err error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return hresp.Body, nil
+		return hresp.Body, readHeaders(hresp), nil
 	}
 	panic("unreachable")
+}
+
+// GetReader retrieves an object from an S3 bucket.
+// It is the caller's responsibility to call Close on rc when
+// finished reading.
+func (b *Bucket) GetReader(path string) (io.ReadCloser, error) {
+	rc, _, error := b.GetReaderHeaders(path, nil)
+	return rc, error
 }
 
 // Put inserts an object into the S3 bucket.
@@ -216,10 +252,11 @@ func (b *Bucket) Put(path string, data []byte, contType string, perm ACL) error 
 	return b.PutReader(path, body, int64(len(data)), contType, perm)
 }
 
-// PutReader inserts an object into the S3 bucket by consuming data
-// from r until EOF.
-func (b *Bucket) PutReader(path string, r io.Reader, length int64, contType string, perm ACL) error {
-	headers := map[string][]string{
+// PutReaderHeaders inserts an object into the S3 bucket by consuming
+// data from r until EOF. Headers are added to the request and
+// returned from the request.
+func (b *Bucket) PutReaderHeaders(path string, r io.Reader, length int64, contType string, perm ACL, headers Headers) (Headers, error) {
+	h := map[string][]string{
 		"Content-Length": {strconv.FormatInt(length, 10)},
 		"Content-Type":   {contType},
 		"x-amz-acl":      {string(perm)},
@@ -228,10 +265,85 @@ func (b *Bucket) PutReader(path string, r io.Reader, length int64, contType stri
 		method:  "PUT",
 		bucket:  b.Name,
 		path:    path,
-		headers: headers,
+		headers: h,
 		payload: r,
 	}
-	return b.S3.query(req, nil)
+	return b.S3.queryHeaders(req, headers, nil)
+}
+
+// PutReader inserts an object into the S3 bucket by consuming data
+// from r until EOF.
+func (b *Bucket) PutReader(path string, r io.Reader, length int64, contType string, perm ACL) error {
+	_, err := b.PutReaderHeaders(path, r, length, contType, perm, nil)
+	return err
+}
+
+// CopyObjectResult is returned as the result of an object copy
+type CopyObjectResult struct {
+	LastModified string
+	// ETag gives the hex-encoded MD5 sum of the contents,
+	// surrounded with double-quotes.
+	ETag string
+}
+
+// Copy creates this object by copying from another object in srcBucket/srcPath
+//
+// If copyMetadata is true the metadata is copied from the srcPath
+// object, otherwise it is written from headers
+//
+// Note that you'll need to set the Content-Type in headers if copyMetadata is false
+//
+// The ACL must be set
+//
+// Headers are added and returned to and from the request.
+func (b *Bucket) Copy(dstPath, srcBucket, srcPath string, copyMetadata bool, perm ACL, headers Headers) (Headers, *CopyObjectResult, error) {
+	copyOrReplace := "REPLACE"
+	if copyMetadata {
+		copyOrReplace = "COPY"
+	}
+	h := map[string][]string{
+		"Content-Length":           {"0"},
+		"x-amz-acl":                {string(perm)},
+		"x-amz-copy-source":        {srcBucket + "/" + srcPath},
+		"x-amz-metadata-directive": {copyOrReplace},
+	}
+
+	req := &request{
+		method:  "PUT",
+		bucket:  b.Name,
+		path:    dstPath,
+		headers: h,
+	}
+	result := &CopyObjectResult{}
+	resultHeaders, err := b.S3.queryHeaders(req, headers, result)
+	return resultHeaders, result, err
+}
+
+// Updates the metadata for this object.  All the metadata is replaced
+// with that passed in.  This works by calling Copy on the same object.
+//
+// Note that you'll need to set the Content-Type in headers
+//
+// The ACL must be set also
+//
+// headers are added and returned
+func (b *Bucket) Update(path string, perm ACL, headers Headers) (Headers, error) {
+	headers, _, err := b.Copy(path, b.Name, path, false, perm, headers)
+	return headers, err
+}
+
+// Head returns headers from an S3 object
+//
+// Any Headers passed in are added to the request
+//
+// http://docs.amazonwebservices.com/AmazonS3/latest/API/RESTObjectHEAD.html
+func (b *Bucket) Head(path string, headers Headers) (Headers, error) {
+	req := &request{
+		method: "HEAD",
+		bucket: b.Name,
+		path:   path,
+	}
+	return b.S3.queryHeaders(req, headers, nil)
 }
 
 // Del removes an object from the S3 bucket.
@@ -434,6 +546,24 @@ func (s3 *S3) query(req *request, resp interface{}) error {
 	}
 	hresp.Body.Close()
 	return nil
+}
+
+// queryHeaders prepares and runs the req request.
+// If headers is not nil the Headers will be added
+// If resp is not nil, the XML data contained in the response
+// body will be unmarshalled on it.
+// Any headers in the response will be returned
+func (s3 *S3) queryHeaders(req *request, headers Headers, resp interface{}) (Headers, error) {
+	headers.writeHeaders(&req.headers)
+	err := s3.prepare(req)
+	if err != nil {
+		return nil, err
+	}
+	hresp, err := s3.run(req)
+	if err != nil {
+		return nil, err
+	}
+	return readHeaders(hresp), nil
 }
 
 // prepare sets up req to be delivered to S3.
