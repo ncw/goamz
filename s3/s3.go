@@ -40,6 +40,9 @@ type S3 struct {
 type Bucket struct {
 	*S3
 	Name string
+	// The following fields are only set on buckets returned from the ListBuckets call
+	Owner        Owner     // Owner of the bucket
+	CreationDate time.Time // When the bucket was created
 }
 
 // The Owner type represents the owner of the object in an S3 bucket.
@@ -64,7 +67,44 @@ func (s3 *S3) Bucket(name string) *Bucket {
 	if s3.Region.S3BucketEndpoint != "" || s3.Region.S3LowercaseBucket {
 		name = strings.ToLower(name)
 	}
-	return &Bucket{s3, name}
+	return &Bucket{S3: s3, Name: name}
+}
+
+// bucketsResp is returned by S3.Buckets
+type bucketsResp struct {
+	Owner   Owner
+	Buckets []struct {
+		Name         string
+		CreationDate string // Date the bucket was created, e.g., 2009-02-03T16:45:09.000Z
+	} `xml:"Buckets>Bucket"`
+}
+
+// List returns a list of all buckets owned by the sender
+//
+// See http://docs.amazonwebservices.com/AmazonS3/latest/API/RESTServiceGET.html
+func (s3 *S3) ListBuckets() (buckets []*Bucket, err error) {
+	req := &request{
+		method: "GET",
+		bucket: "",
+		path:   "",
+	}
+	result := &bucketsResp{}
+	err = s3.query(req, result)
+	if err != nil {
+		return nil, err
+	}
+	buckets = make([]*Bucket, len(result.Buckets))
+	for i := range buckets {
+		info := result.Buckets[i]
+		b := s3.Bucket(info.Name)
+		b.CreationDate, err = time.Parse(time.RFC3339Nano, info.CreationDate)
+		if err != nil {
+			return nil, err
+		}
+		b.Owner = result.Owner
+		buckets[i] = b
+	}
+	return buckets, nil
 }
 
 var createBucketConfiguration = `<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"> 
@@ -418,19 +458,21 @@ func (s3 *S3) prepare(req *request) error {
 			req.path = "/" + req.path
 		}
 		req.signpath = req.path
-		if req.bucket != "" {
-			req.baseurl = s3.Region.S3BucketEndpoint
-			if req.baseurl == "" {
-				// Use the path method to address the bucket.
-				req.baseurl = s3.Region.S3Endpoint
+		req.baseurl = s3.Region.S3BucketEndpoint
+		if req.baseurl == "" {
+			// Use the path method to address the bucket.
+			req.baseurl = s3.Region.S3Endpoint
+			if req.bucket != "" {
 				req.path = "/" + req.bucket + req.path
-			} else {
-				// Just in case, prevent injection.
-				if strings.IndexAny(req.bucket, "/:@") >= 0 {
-					return fmt.Errorf("bad S3 bucket: %q", req.bucket)
-				}
-				req.baseurl = strings.Replace(req.baseurl, "${bucket}", req.bucket, -1)
 			}
+		} else {
+			// Just in case, prevent injection.
+			if strings.IndexAny(req.bucket, "/:@") >= 0 {
+				return fmt.Errorf("bad S3 bucket: %q", req.bucket)
+			}
+			req.baseurl = strings.Replace(req.baseurl, "${bucket}", req.bucket, -1)
+		}
+		if req.bucket != "" {
 			req.signpath = "/" + req.bucket + req.signpath
 		}
 	}

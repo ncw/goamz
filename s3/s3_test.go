@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"launchpad.net/goamz/aws"
@@ -275,4 +276,32 @@ func (s *S) TestListWithDelimiter(c *C) {
 	c.Assert(data.IsTruncated, Equals, false)
 	c.Assert(len(data.Contents), Equals, 0)
 	c.Assert(data.CommonPrefixes, DeepEquals, []string{"photos/2006/feb/", "photos/2006/jan/"})
+}
+
+// List buckets docs: See http://docs.amazonwebservices.com/AmazonS3/latest/API/RESTServiceGET.html
+
+func (s *S) TestListBuckets(c *C) {
+	testServer.Response(200, nil, GetBucketsListResultDump)
+
+	buckets, err := s.s3.ListBuckets()
+	c.Assert(err, IsNil)
+
+	req := testServer.WaitRequest()
+	c.Assert(req.Method, Equals, "GET")
+	c.Assert(req.URL.Path, Equals, "/")
+	c.Assert(req.Header["Date"], Not(Equals), "")
+	c.Assert(req.Form, DeepEquals, url.Values{})
+
+	c.Assert(len(buckets), Equals, 2)
+
+	c.Assert(buckets[0].Name, Equals, "quotes")
+	c.Assert(buckets[0].CreationDate, Equals, time.Date(2006, 2, 3, 16, 45, 9, 0, time.UTC))
+	c.Assert(buckets[0].Owner.ID, Equals, "bcaf1ffd86f461ca5fb16fd081034f")
+	c.Assert(buckets[0].Owner.DisplayName, Equals, "webfile")
+
+	c.Assert(buckets[1].Name, Equals, "samples")
+	c.Assert(buckets[1].CreationDate, Equals, time.Date(2006, 2, 3, 16, 41, 58, 0, time.UTC))
+	c.Assert(buckets[1].Owner.ID, Equals, "bcaf1ffd86f461ca5fb16fd081034f")
+	c.Assert(buckets[1].Owner.DisplayName, Equals, "webfile")
+
 }
