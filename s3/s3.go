@@ -35,6 +35,7 @@ type S3 struct {
 	aws.Auth
 	aws.Region
 	private byte // Reserve the right of using private data.
+	Client  *http.Client
 }
 
 // The Bucket type encapsulates operations with an S3 bucket.
@@ -60,7 +61,7 @@ var attempts = aws.AttemptStrategy{
 
 // New creates a new S3.
 func New(auth aws.Auth, region aws.Region) *S3 {
-	return &S3{auth, region, 0}
+	return &S3{auth, region, 0, http.DefaultClient}
 }
 
 // Bucket returns a Bucket with the given name.
@@ -650,7 +651,7 @@ func (s3 *S3) run(req *request) (*http.Response, error) {
 		hreq.Body = ioutil.NopCloser(req.payload)
 	}
 
-	hresp, err := http.DefaultClient.Do(&hreq)
+	hresp, err := s3.Client.Do(&hreq)
 	if err != nil {
 		return nil, err
 	}
